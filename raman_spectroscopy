@@ -1,0 +1,268 @@
+import pandas as pd
+import numpy as np
+import os
+import openpyxl
+import matplotlib.pyplot as plt
+import scipy.signal as ss
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from matplotlib import colormaps
+
+## FUNCTIONS
+# subtract min value from signal
+def subtract_min(signal):
+    subtracted_signal = signal - min(signal)
+    return subtracted_signal
+
+# subtract polynomial fitted baseline from signal
+def subtract_poly(x, signal, polydeg):
+        coeffs = np.polyfit(x, signal, polydeg)
+        polyfunc = np.poly1d(coeffs)
+        subtracted_signal = signal - polyfunc(x)
+        return subtracted_signal
+
+# smooth signal
+def smoothing(signal, window, deg):
+    smoothed_signal = ss.savgol_filter(signal, window, deg)
+    return smoothed_signal
+
+# cosmic spike detection (Whitaker and Hayes, 2018)
+def cosmic_spike_detection(signal, mod_z_factor, mod_z_limit):
+    median = np.median(signal)
+    mad = np.median([np.abs(signal - median)])
+    mod_z_scores = mod_z_factor * (signal - median) / mad
+    if max(mod_z_scores) > mod_z_limit:
+        # plt.plot(rs, signal)
+        # plt.axvline(x=rs[np.argmax(mod_z_scores)], alpha=0.3, color='yellow')
+        # plt.show()
+        # plt.close()
+        despiked_signal = signal # check outcome
+    else:
+        despiked_signal = signal
+    
+    return despiked_signal  
+
+# find peaks and their respective properties in dataset
+def peak_finder(df, key_label_col):
+    keys = ['peak_position', 'peak_intensity', 'peak_width']
+    dic = dict()
+    for row in df.index:
+        label = df.at[row, key_label_col]
+        dic[label] = dict.fromkeys(keys, None)
+        signal = df.loc[row, rs_col_names]
+        peaks, properties = ss.find_peaks(signal, height=0, width=0)
+        dic[label]['peak_position'] = [rs[posn] for posn in peaks]
+        dic[label]['peak_intensity'] = properties['peak_heights']
+        dic[label]['peak_width'] = properties['widths']
+        dic[label]['peak_ratio'] = properties['peak_heights']/max(properties['peak_heights'])
+    return dic
+
+
+## LOAD SOURCE FILE
+filepath = r"/Users/Nur/Downloads/Temporary Dataset/Kaewseekhao B et al Dataset of serum proteomic spectra from tuberculosis patients detected by Raman spectroscopy and surface-enhanced Raman spectroscopy RS532.csv"
+# read file if path exists
+if os.path.exists(filepath):
+    raw_dataset = pd.read_csv(filepath)
+
+
+## FORMAT DATASET
+# intialise list of Raman Shift
+rs_col_names = raw_dataset.columns[1:]
+
+# fill empty cells with sample names
+for row in raw_dataset.index:
+    if pd.isnull(raw_dataset.at[row,'Sample names']):
+        raw_dataset.at[row, 'Sample names'] = raw_dataset.at[row-1, 'Sample names']     
+   
+# drop rows without keywords
+# raw_dataset = raw_dataset[raw_dataset['Sample names'].str.contains('HC|ATB')]
+
+# add column
+group_label_col = 'Sample names'
+
+if group_label_col == 'Sample groups':
+    raw_dataset.insert(0, 'Sample groups', [label[:-4] for label in raw_dataset['Sample names'].values])
+    raw_dataset.drop('Sample names')
+
+## DETECT ABNORMALITIES & PRE-PROCESSING
+# extract Raman Shift
+rs = rs_col_names.astype('float64')
+
+# prepare empty dataframe
+pp_dataset = pd.DataFrame(index=raw_dataset.index, columns=raw_dataset.columns)
+if group_label_col in pp_dataset.columns:
+    pp_dataset[group_label_col] = raw_dataset[group_label_col]
+if group_label_col in pp_dataset.columns:
+    pp_dataset[group_label_col] = raw_dataset[group_label_col]
+
+# iterate over each sample row
+for row in raw_dataset.index:
+    subject = raw_dataset.loc[row, group_label_col]
+    raw_signal = raw_dataset.loc[row, rs_col_names].astype('float64')
+    # notify if data lengths mismatch
+    if len(rs) != len(raw_signal):
+        print('Data length mismatch!')
+        breakpoint
+
+    # detect cosmic spike
+    raw_signal = cosmic_spike_detection(raw_signal, 0.6745, 25)
+    
+    # check if data is normalized
+    if min(raw_signal) != 0 and max(raw_signal) != 1:
+        print(min(raw_signal))
+        print(max(raw_signal))
+    
+    # interpolation
+    
+    # baseline correction: removal of DC and AC noise from baseline
+    dc_sub_signal = subtract_min(raw_signal)
+    ac_sub_signal = subtract_poly(rs, dc_sub_signal, 1)
+    norm_signal = subtract_min(ac_sub_signal)
+
+    # smooth signal
+    smooth_signal = smoothing(norm_signal, 5, 3)
+    
+    pp_dataset.loc[row, rs_col_names] = smooth_signal
+
+    pass
+    # plt.plot(rs, raw_signal, label= 'Raw')
+    # plt.plot(rs, dc_sub_signal, label= 'DC Subtracted')
+    # plt.plot(rs, ac_sub_signal, label='AC Subtracted')
+    # plt.plot(rs, norm_signal, label='Norm AC Subtracted')
+    # plt.plot(rs, smooth_signal, label='Smoothed Norm AC Subtracted')
+    # plt.legend()
+    # plt.show()
+    # plt.close()
+
+
+
+## PEAK ANALYSIS
+peaks_dict = peak_finder(pp_dataset, group_label_col)
+
+# average signal by sample
+avg_dataset = pp_dataset.groupby(group_label_col).mean()
+min_dataset = pp_dataset.groupby(group_label_col).min()
+max_dataset = pp_dataset.groupby(group_label_col).max() 
+std_dataset = pp_dataset.groupby(group_label_col).std()
+low_std_dataset = std_dataset - avg_dataset
+upp_std_dataset = std_dataset + avg_dataset
+
+def create_colors(var_len):
+    spacing = np.linspace(0, 1, var_len)
+    color_map = colormaps.get_cmap('Spectral')
+    color_list = color_map(spacing)
+    return color_list
+
+colors = create_colors(len(avg_dataset.index))
+
+for key_label, c in zip(avg_dataset.index, colors):
+    plt.plot(rs, avg_dataset.loc[key_label], label=key_label, color=c)
+    plt.plot(rs, min_dataset.loc[key_label], linestyle='--', color=c, alpha=0.7)
+    plt.plot(rs, max_dataset.loc[key_label], linestyle='--', color=c, alpha=0.7)
+    plt.fill_between(x=rs, y1=upp_std_dataset.loc[key_label].astype('float'), 
+                     y2=low_std_dataset.loc[key_label].astype('float'), 
+                     alpha=0.5, color=c)
+plt.legend()
+
+# create subplots
+subplot_rows = 2
+subplot_cols = 1
+
+while len(avg_dataset.index) >= subplot_rows*subplot_cols:
+    if subplot_rows%3 == 0 and subplot_rows/subplot_cols ==  3:
+        subplot_cols += 1
+    else:
+        subplot_rows += 1
+
+f, axes = plt.subplots(nrows=subplot_rows, ncols=subplot_cols)
+
+for ax, key_label, c in zip(axes.ravel(), avg_dataset.index, colors):
+    ax.plot(rs, avg_dataset.loc[key_label], label=key_label, color=c)
+    ax.plot(rs, min_dataset.loc[key_label], linestyle='--', color=c, alpha=0.7)
+    ax.plot(rs, max_dataset.loc[key_label], linestyle='--', color=c, alpha=0.7)
+    ax.fill_between(x=rs, y1=upp_std_dataset.loc[key_label].astype('float'), 
+                     y2=low_std_dataset.loc[key_label].astype('float'), 
+                     alpha=0.5, color=c)
+plt.legend()
+# plt.show()
+plt.close()
+
+pass
+
+## VISUALIZATION 
+to_regroup_for_pca = True
+pca_data = avg_dataset.loc[:, rs_col_names].values
+if to_regroup_for_pca:
+    pca_label = [label[:-4] for label in avg_dataset.index]
+else:
+    pca_label = avg_dataset.index
+norm_pca_data = StandardScaler().fit_transform(pca_data)
+no_of_pc = 2
+pca_function = PCA(n_components=no_of_pc)
+pc = pca_function.fit_transform(norm_pca_data)
+pca_df_columns = ['PC%i' %pc_no for pc_no in range(1, no_of_pc+1)]
+pca_df = pd.DataFrame(data = pc, columns = pca_df_columns, index=pca_label)
+pca_var_ratio = 100*pca_function.explained_variance_ratio_
+pass
+
+plt.figure(figsize=(10,10))
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=14)
+plt.xlabel('PC1 ({}%)'.format(round(pca_var_ratio[0],2)))
+plt.ylabel('PC2 ({}%)'.format(round(pca_var_ratio[1], 2)))
+plt.title("Principal Component Analysis of Breast Cancer Dataset",fontsize=20)
+
+targets = np.unique(pca_label) # HC: healthy control, ATB: active TB, EC: exposed w/o TB, LTBI: latent TB
+color_list = create_colors(len(targets))
+for target, color in zip(targets, color_list):
+    target_pca_df = pca_df[pca_df.index == target]
+    # indicesToKeep = pca_label == target
+    plt.scatter(target_pca_df.loc[:, 'PC1'], 
+                target_pca_df.loc[:, 'PC2'], 
+                c = color, s = 50)
+plt.legend(targets,prop={'size': 15})
+
+# plot PC individually # to be tested
+f, (ax1, ax2, ax3) = plt.subplots(nrows=3, ncols=1, sharex=True)
+for key_label, c in zip(avg_dataset.index, colors):
+    ax1.plot(rs, avg_dataset.loc[key_label], label=key_label, color=c)
+ax1.get_legend()
+ax1.set_title('Average Signal')
+ax2.plot(rs, pca_function.components_[0])
+ax2.set_title('PC1 ({}%)'.format(round(pca_var_ratio[0],2)))
+ax3.plot(rs, pca_function.components_[1])
+ax3.set_title('PC2 ({}%)'.format(round(pca_var_ratio[1],2)))
+
+plt.legend()
+
+plt.show()
+plt.close()
+
+# VERIFY PCA FUNCTION
+# from sklearn.datasets import load_breast_cancer
+# breast = load_breast_cancer()
+# breast_data = breast.data
+# breast_data.shape
+# breast_labels = breast.target
+# labels = np.reshape(breast_labels,(569,1))
+# final_breast_data = np.concatenate([breast_data,labels],axis=1)
+# breast_dataset = pd.DataFrame(final_breast_data)
+# features = breast.feature_names
+# features_labels = np.append(features,'label')
+# breast_dataset.columns = features_labels
+# breast_dataset['label'].replace(0, 'Benign',inplace=True)
+# breast_dataset['label'].replace(1, 'Malignant',inplace=True)
+
+# pca_data = breast_dataset.loc[:, features].values
+# pca_label = [label[:-4] for label in avg_dataset.index.values]
+# norm_pca_data = StandardScaler().fit_transform(pca_data)
+# feat_cols = ['feature'+str(i) for i in range(norm_pca_data.shape[1])]
+# normalised_breast = pd.DataFrame(norm_pca_data,columns=feat_cols)
+# no_of_pc = 2
+# pca_function = PCA(n_components=no_of_pc)
+# pc = pca_function.fit_transform(norm_pca_data)
+# pca_df_columns = ['PC%i' %pc_no for pc_no in range(1, no_of_pc+1)]
+# pca_df = pd.DataFrame(data = pc, columns = pca_df_columns)
+# pca_var_ratio = 100*pca_function.explained_variance_ratio_
+# pass
+
