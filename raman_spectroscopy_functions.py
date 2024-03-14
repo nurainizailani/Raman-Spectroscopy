@@ -2,8 +2,11 @@ import numpy as np
 import pandas as pd
 from matplotlib import colormaps
 import scipy.signal as ss
+import os
+import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from scipy.signal import medfilt
 
 # subtract min value from signal
 def subtract_min(signal):
@@ -22,21 +25,35 @@ def smoothing(signal, window, deg):
     smoothed_signal = ss.savgol_filter(signal, window, deg)
     return smoothed_signal
 
-# cosmic spike detection (Whitaker and Hayes, 2018)
-def cosmic_spike_detection(signal, mod_z_factor, mod_z_limit):
-    median = np.median(signal)
-    mad = np.median([np.abs(signal - median)])
-    mod_z_scores = mod_z_factor * (signal - median) / mad
-    if max(mod_z_scores) > mod_z_limit:
-        # plt.plot(rs, signal)
-        # plt.axvline(x=rs[np.argmax(mod_z_scores)], alpha=0.3, color='yellow')
-        # plt.show()
-        # plt.close()
-        despiked_signal = signal # check outcome
-    else:
-        despiked_signal = signal
+# cosmic spike detection (reference: Whitaker and Hayes, 2018)
+def cosmic_spike_detection(x, signal, mod_z_factor, mod_z_limit, sample_no):
+    # calculate difference of signal from its predecessor
+    diff_signal = np.diff(signal, append=[signal.iloc[-1]])
+    # find median absolute deviation
+    median = np.median(diff_signal)
+    mad = np.median([np.abs(diff_signal - median)])
+    # find modified z score
+    mod_z_scores = mod_z_factor * (diff_signal - median) / mad
+    # find maximum value and its index
+    abs_max = np.max(np.abs(mod_z_scores))
+    abs_max_idx = np.argmax(np.abs(mod_z_scores))
     
-    return despiked_signal  
+    # if maximum exceed threshold, despike plot
+    if abs_max > mod_z_limit:
+        plt.plot(x, signal, label='Before De-spiking')
+        # median filter of segemented signal
+        filtered = medfilt(signal[abs_max_idx-5:abs_max_idx+5])
+        # replace value
+        for y_idx, y_new in enumerate(filtered):
+            signal.iloc[abs_max_idx-5+y_idx] = y_new
+        plt.plot(x, signal, label='After De-spiking')
+        plt.axvline(x=x[abs_max_idx], alpha=0.3, color='yellow')
+        plt.legend()
+        plt.title(abs_max)
+        plt.savefig(os.path.join(os.getcwd(), 'results', 'CS Sample%i' % sample_no))
+        plt.close()
+    
+    return signal  
 
 # find peaks and their respective properties in dataset
 def peak_finder(x, df, key_label_col, col_names):
